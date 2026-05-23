@@ -145,7 +145,7 @@ Agent returns: 2024-02-29T00:00:00.000Z
 
 ## Tools
 
-The server exposes 7 MCP tools:
+The server exposes 8 MCP tools:
 
 ### `create_session` — Spawn an interactive process
 
@@ -174,9 +174,11 @@ The server exposes 7 MCP tools:
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `session_id` | Yes | — | Target session |
-| `input` | Yes | — | Command/input to send (newline appended automatically) |
+| `input` | Yes | — | Command/input to send to the session |
 | `timeout_ms` | No | `5000` | Max wait time for output |
 | `max_output_chars` | No | `20000` | Truncate output beyond this |
+| `append_newline` | No | `true` | Whether to append a newline after the input. Set `false` for raw input (tab completion, y/n prompts) |
+| `fire_and_forget` | No | `false` | Send input and return immediately without waiting for output. Use `read_output` to check results later |
 
 Dangerous commands (`rm -rf`, `DROP TABLE`, `curl|bash`, etc.) are blocked — the agent must use `confirm_dangerous_command` first.
 
@@ -212,6 +214,21 @@ Safe to auto-approve.
 ```
 
 Supported: `ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+l`, `ctrl+r`, `tab`, `escape`, `up`, `down`, `left`, `right`, `enter`, `backspace`, `delete`, `home`, `end`, and more.
+
+### `resize_session` — Resize terminal dimensions
+
+```json
+{ "session_id": "a1b2c3d4", "cols": 200, "rows": 50 }
+→ { "success": true, "mode": "pty" }
+```
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `session_id` | Yes | — | Target session |
+| `cols` | Yes | — | New terminal width (40–300) |
+| `rows` | Yes | — | New terminal height (10–100) |
+
+Only effective in PTY mode. Pipe-mode sessions acknowledge the request but the resize has no effect.
 
 ### `confirm_dangerous_command` — Two-step safety confirmation
 
@@ -316,6 +333,7 @@ All settings via environment variables. Pass them in your MCP config:
 | `MCP_TERMINAL_MAX_SESSIONS` | `10` | Max concurrent sessions |
 | `MCP_TERMINAL_MAX_OUTPUT` | `20000` | Max output chars per read |
 | `MCP_TERMINAL_DEFAULT_TIMEOUT` | `5000` | Default wait timeout (ms) |
+| `MCP_TERMINAL_SETTLE_MS` | `300` | Output settle time for startup and command completion detection (ms) |
 | `MCP_TERMINAL_BLOCKED_COMMANDS` | — | Comma-separated blocklist |
 | `MCP_TERMINAL_ALLOWED_COMMANDS` | — | Comma-separated allowlist (if set, only these are allowed) |
 | `MCP_TERMINAL_ALLOWED_PATHS` | — | Comma-separated paths sessions can access |
@@ -429,7 +447,7 @@ Or globally via environment variable:
 | Dangerous command confirmation | Yes (separate tool) | No | No |
 | MCP tool annotations | Yes | No | No |
 | Background sessions | Yes | No (uses active tab) | Yes |
-| Focused API | 7 tools | 2-3 tools | 15-20+ tools (scope creep) |
+| Focused API | 8 tools | 2-3 tools | 15-20+ tools (scope creep) |
 | Install | `npx -y` (zero-config) | Requires specific app | Varies |
 
 ## Development
