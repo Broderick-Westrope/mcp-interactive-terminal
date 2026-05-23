@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { SessionManager } from "../src/session-manager.js";
 import type { ServerConfig } from "../src/types.js";
 import { canSpawnPty } from "./can-spawn-pty.js";
@@ -22,6 +22,7 @@ const defaultConfig: ServerConfig = {
   sandboxAllowWrite: ["/tmp"],
   sandboxAllowNetwork: ["*"],
   auditLog: "",
+  settleMs: 300,
 };
 
 describe("SessionManager", () => {
@@ -121,4 +122,19 @@ describe("SessionManager", () => {
     expect(manager.isPathAllowed("/anywhere")).toBe(true);
     expect(manager.isPathAllowed("/etc/passwd")).toBe(true);
   });
+
+  itPty("clears alive check interval when session is closed", async () => {
+    manager = new SessionManager(defaultConfig);
+    const session = await manager.createSession({ command: BASH });
+
+    expect(session.aliveCheckInterval).toBeDefined();
+
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+    const intervalId = session.aliveCheckInterval;
+
+    manager.closeSession(session.id);
+
+    expect(clearIntervalSpy).toHaveBeenCalledWith(intervalId);
+    clearIntervalSpy.mockRestore();
+  }, 10000);
 });

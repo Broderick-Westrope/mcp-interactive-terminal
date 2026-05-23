@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { createTerminal } from "../src/terminal.js";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { createTerminal, waitForStartup } from "../src/terminal.js";
 import type { TerminalWrapper } from "../src/types.js";
 import { canSpawnPty } from "./can-spawn-pty.js";
 
@@ -64,4 +64,45 @@ describe("Terminal", () => {
 
     expect(() => terminal!.write("test\n")).toThrow(/not alive/);
   }, 10000);
+});
+
+describe("waitForStartup", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves when buffer stops growing", async () => {
+    vi.useFakeTimers();
+    let buffer = "";
+
+    const promise = waitForStartup(() => buffer.length, 300, 3000);
+
+    // First poll — buffer is empty, keep polling
+    await vi.advanceTimersByTimeAsync(50);
+
+    // Buffer gets some data
+    buffer = "startup output";
+
+    // Poll sees data, same length on next poll triggers settle check
+    await vi.advanceTimersByTimeAsync(50);
+    // Buffer hasn't grown — settle timer fires
+    await vi.advanceTimersByTimeAsync(300);
+    // Final confirmation check
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("resolves on timeout if buffer never settles", async () => {
+    vi.useFakeTimers();
+    let count = 0;
+
+    // Buffer keeps growing on every check
+    const promise = waitForStartup(() => ++count, 300, 500);
+
+    // Advance past the timeout
+    await vi.advanceTimersByTimeAsync(501);
+
+    await expect(promise).resolves.toBeUndefined();
+  });
 });

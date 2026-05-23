@@ -33,7 +33,7 @@ export class SessionManager {
     // Validate cwd against allowed paths
     this.validatePath(options.cwd);
 
-    const terminal = await createTerminal(options);
+    const terminal = await createTerminal({ ...options, settleMs: this.config.settleMs });
     const id = randomUUID().slice(0, 8);
     const session: Session = {
       id,
@@ -56,10 +56,10 @@ export class SessionManager {
     }
 
     // Update isAlive on process exit
-    const checkAlive = setInterval(() => {
+    session.aliveCheckInterval = setInterval(() => {
       if (!terminal.isAlive) {
         session.isAlive = false;
-        clearInterval(checkAlive);
+        clearInterval(session.aliveCheckInterval);
       }
     }, 1000);
 
@@ -89,6 +89,9 @@ export class SessionManager {
 
   closeSession(id: string, signal?: string): void {
     const session = this.getSession(id);
+    if (session.aliveCheckInterval) {
+      clearInterval(session.aliveCheckInterval);
+    }
     session.terminal.kill(signal);
     session.terminal.dispose();
     session.isAlive = false;
@@ -97,12 +100,9 @@ export class SessionManager {
   }
 
   closeAll(): void {
-    for (const [id] of this.sessions) {
-      try {
-        this.closeSession(id);
-      } catch {
-        // Ignore errors during cleanup
-      }
+    const ids = [...this.sessions.keys()];
+    for (const id of ids) {
+      try { this.closeSession(id); } catch { /* ignore */ }
     }
   }
 

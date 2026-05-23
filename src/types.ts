@@ -17,6 +17,7 @@ export interface ServerConfig {
   sandbox: boolean;
   sandboxAllowWrite: string[];
   sandboxAllowNetwork: string[];
+  settleMs: number;
 }
 
 export function loadConfig(): ServerConfig {
@@ -41,6 +42,7 @@ export function loadConfig(): ServerConfig {
     sandbox: process.env.MCP_TERMINAL_SANDBOX === "true",
     sandboxAllowWrite: envList("MCP_TERMINAL_SANDBOX_ALLOW_WRITE", ["/tmp"]),
     sandboxAllowNetwork: envList("MCP_TERMINAL_SANDBOX_ALLOW_NETWORK", ["*"]),
+    settleMs: parseInt(process.env.MCP_TERMINAL_SETTLE_MS || "300", 10),
   };
 }
 
@@ -57,6 +59,7 @@ export interface Session {
   isAlive: boolean;
   terminal: TerminalWrapper;
   pendingDangerousCommands: Set<string>;
+  aliveCheckInterval?: ReturnType<typeof setInterval>;
 }
 
 export interface SessionInfo {
@@ -82,6 +85,7 @@ export interface TerminalWrapper {
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
   dispose(): void;
+  clearOutputBuffer?(): void;
 }
 
 // --- Tool I/O types ---
@@ -107,6 +111,8 @@ export interface SendCommandInput {
   input: string;
   timeout_ms?: number;
   max_output_chars?: number;
+  append_newline?: boolean;
+  fire_and_forget?: boolean;
 }
 
 export interface SendCommandOutput {
@@ -142,6 +148,18 @@ export interface SendControlInput {
 
 export interface SendControlOutput {
   output: string;
+}
+
+export interface ResizeSessionInput {
+  session_id: string;
+  cols: number;
+  rows: number;
+}
+
+export interface ResizeSessionOutput {
+  success: boolean;
+  mode: "pty" | "pipe";
+  warning?: string;
 }
 
 export interface ConfirmDangerousCommandInput {

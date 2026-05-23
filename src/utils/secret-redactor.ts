@@ -11,7 +11,6 @@ interface SecretPattern {
 const SECRET_PATTERNS: SecretPattern[] = [
   // AWS
   { pattern: /\b(AKIA[0-9A-Z]{16})\b/g, label: "AWS_ACCESS_KEY" },
-  { pattern: /\b([0-9a-zA-Z/+]{40})\b/g, label: "POSSIBLE_AWS_SECRET" },
 
   // GitHub
   { pattern: /\b(ghp_[0-9a-zA-Z]{36,})\b/g, label: "GITHUB_PAT" },

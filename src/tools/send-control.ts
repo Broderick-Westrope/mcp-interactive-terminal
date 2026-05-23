@@ -85,6 +85,8 @@ export async function handleSendControl(
       }
       // Also signal the shell process itself
       try { process.kill(session.terminal.pid, sig); } catch { /* ignore */ }
+      // Clear the output buffer so subsequent readScreen only shows new output
+      session.terminal.clearOutputBuffer?.();
     } else {
       session.terminal.write(sequence);
     }

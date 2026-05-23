@@ -14,6 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig, type ServerConfig } from "./types.js";
 import { SessionManager } from "./session-manager.js";
+import { VERSION } from "./version.js";
 
 import { createSessionSchema, handleCreateSession } from "./tools/create-session.js";
 import { sendCommandSchema, handleSendCommand } from "./tools/send-command.js";
@@ -25,8 +26,62 @@ import {
   confirmDangerousCommandSchema,
   handleConfirmDangerousCommand,
 } from "./tools/confirm-dangerous-command.js";
+import { resizeSessionSchema, handleResizeSession } from "./tools/resize-session.js";
 import { initSandbox, resetSandbox } from "./sandbox.js";
 import { configureAudit, audit } from "./utils/audit-logger.js";
+
+// --- Tool Registration ---
+
+interface ToolDef {
+  name: string;
+  description: string;
+  schema: any;
+  annotations: Record<string, unknown>;
+  handler: (args: any, sm: SessionManager, cfg: ServerConfig) => Promise<unknown>;
+}
+
+const tools: ToolDef[] = [
+  { name: "create_session",
+    description: "Spawn an interactive terminal session (REPL, shell, database client, SSH, etc.). Returns a session_id for subsequent commands.",
+    schema: createSessionSchema.shape,
+    annotations: { title: "Create Session", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    handler: (args, sm, cfg) => handleCreateSession(args, sm, cfg) },
+  { name: "send_command",
+    description: "Send a command/input to an interactive session and wait for output. Returns clean text output (no ANSI codes). Supports append_newline (default true) and fire_and_forget (default false) to return immediately. If a dangerous command is detected, use confirm_dangerous_command first.",
+    schema: sendCommandSchema.shape,
+    annotations: { title: "Send Command", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    handler: (args, sm, cfg) => handleSendCommand(args, sm, cfg) },
+  { name: "read_output",
+    description: "Read the current terminal screen without sending any input. Safe read-only operation.",
+    schema: readOutputSchema.shape,
+    annotations: { title: "Read Output", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    handler: (args, sm, cfg) => handleReadOutput(args, sm, cfg) },
+  { name: "list_sessions",
+    description: "List all active interactive terminal sessions. Safe read-only operation.",
+    schema: {},
+    annotations: { title: "List Sessions", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    handler: (_args, sm, _cfg) => handleListSessions(sm) },
+  { name: "close_session",
+    description: "Close/kill an interactive terminal session.",
+    schema: closeSessionSchema.shape,
+    annotations: { title: "Close Session", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    handler: (args, sm, _cfg) => handleCloseSession(args, sm) },
+  { name: "send_control",
+    description: "Send a control character or special key to a session (e.g., ctrl+c to interrupt, ctrl+d to send EOF, arrow keys, tab for completion).",
+    schema: sendControlSchema.shape,
+    annotations: { title: "Send Control", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    handler: (args, sm, cfg) => handleSendControl(args, sm, cfg) },
+  { name: "confirm_dangerous_command",
+    description: "Execute a command that was flagged as dangerous by send_command. Requires a justification explaining WHY the command is necessary. This is a separate confirmation step for safety.",
+    schema: confirmDangerousCommandSchema.shape,
+    annotations: { title: "Confirm Dangerous Command", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    handler: (args, sm, cfg) => handleConfirmDangerousCommand(args, sm, cfg) },
+  { name: "resize_session",
+    description: "Resize a terminal session's dimensions. Only effective in PTY mode; pipe-mode sessions will acknowledge the request but the resize has no effect.",
+    schema: resizeSessionSchema.shape,
+    annotations: { title: "Resize Session", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    handler: (args, sm, _cfg) => handleResizeSession(args, sm) },
+];
 
 /**
  * Create a configured McpServer with all tools registered.
@@ -38,159 +93,22 @@ function createServer(cfg?: ServerConfig) {
 
   const server = new McpServer({
     name: "mcp-interactive-terminal",
-    version: "1.0.0",
+    version: VERSION,
   });
 
-  // --- Tool Registration ---
-
-  server.tool(
-    "create_session",
-    "Spawn an interactive terminal session (REPL, shell, database client, SSH, etc.). Returns a session_id for subsequent commands.",
-    createSessionSchema.shape,
-    { title: "Create Session", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    async ({ command, args, name, cwd, env, cols, rows }) => {
+  for (const t of tools) {
+    server.tool(t.name, t.description, t.schema, t.annotations, async (args: any) => {
       try {
-        const result = await handleCreateSession(
-          { command, args, name, cwd, env, cols, rows },
-          sessionManager,
-          config,
-        );
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        const result = await t.handler(args, sessionManager, config);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return {
-          content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
           isError: true,
         };
       }
-    },
-  );
-
-  server.tool(
-    "send_command",
-    "Send a command/input to an interactive session and wait for output. Appends newline automatically. Returns clean text output (no ANSI codes). If a dangerous command is detected, you must use confirm_dangerous_command first.",
-    sendCommandSchema.shape,
-    { title: "Send Command", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    async ({ session_id, input, timeout_ms, max_output_chars }) => {
-      try {
-        const result = await handleSendCommand(
-          { session_id, input, timeout_ms, max_output_chars },
-          sessionManager,
-          config,
-        );
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.tool(
-    "read_output",
-    "Read the current terminal screen without sending any input. Safe read-only operation.",
-    readOutputSchema.shape,
-    { title: "Read Output", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ session_id, full_screen }) => {
-      try {
-        const result = await handleReadOutput(
-          { session_id, full_screen },
-          sessionManager,
-          config,
-        );
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.tool(
-    "list_sessions",
-    "List all active interactive terminal sessions. Safe read-only operation.",
-    {},
-    { title: "List Sessions", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async () => {
-      try {
-        const result = await handleListSessions(sessionManager);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.tool(
-    "close_session",
-    "Close/kill an interactive terminal session.",
-    closeSessionSchema.shape,
-    { title: "Close Session", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    async ({ session_id, signal }) => {
-      try {
-        const result = await handleCloseSession(
-          { session_id, signal },
-          sessionManager,
-        );
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.tool(
-    "send_control",
-    "Send a control character or special key to a session (e.g., ctrl+c to interrupt, ctrl+d to send EOF, arrow keys, tab for completion).",
-    sendControlSchema.shape,
-    { title: "Send Control", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ session_id, control }) => {
-      try {
-        const result = await handleSendControl(
-          { session_id, control },
-          sessionManager,
-          config,
-        );
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.tool(
-    "confirm_dangerous_command",
-    "Execute a command that was flagged as dangerous by send_command. Requires a justification explaining WHY the command is necessary. This is a separate confirmation step for safety.",
-    confirmDangerousCommandSchema.shape,
-    { title: "Confirm Dangerous Command", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    async ({ session_id, input, justification }) => {
-      try {
-        const result = await handleConfirmDangerousCommand(
-          { session_id, input, justification },
-          sessionManager,
-          config,
-        );
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        };
-      }
-    },
-  );
+    });
+  }
 
   return { server, config, sessionManager };
 }

@@ -20,6 +20,7 @@ export type AuditEvent =
   | "command_blocked_path"
   | "control"
   | "read_output"
+  | "resize"
   | "list_sessions"
   | "sandbox_init"
   | "sandbox_fail";

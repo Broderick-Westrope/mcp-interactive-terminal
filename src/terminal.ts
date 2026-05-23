@@ -15,7 +15,30 @@ import { detectPromptPattern, endsWithPrompt } from "./utils/output-detector.js"
 import { stripAnsi } from "./utils/sanitizer.js";
 import { wrapCommand, isSandboxActive } from "./sandbox.js";
 
-const OUTPUT_SETTLE_MS = 300;
+export async function waitForStartup(
+  getBufferLen: () => number,
+  settleMs: number,
+  timeoutMs: number = 3000,
+): Promise<void> {
+  const start = Date.now();
+  let lastLen = 0;
+  return new Promise<void>((resolve) => {
+    const poll = () => {
+      const currentLen = getBufferLen();
+      if (Date.now() - start >= timeoutMs) { resolve(); return; }
+      if (currentLen > 0 && currentLen === lastLen) {
+        setTimeout(() => {
+          if (getBufferLen() === currentLen) resolve();
+          else { lastLen = getBufferLen(); setTimeout(poll, 50); }
+        }, settleMs);
+        return;
+      }
+      lastLen = currentLen;
+      setTimeout(poll, 50);
+    };
+    setTimeout(poll, 50);
+  });
+}
 
 export interface TerminalOptions {
   command: string;
@@ -24,6 +47,7 @@ export interface TerminalOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  settleMs?: number;
 }
 
 /**
@@ -48,6 +72,7 @@ async function createPtyTerminal(options: TerminalOptions): Promise<TerminalWrap
 
   const cols = options.cols ?? 120;
   const rows = options.rows ?? 40;
+  const settleMs = options.settleMs ?? 300;
   const xterm = new Terminal({ cols, rows, scrollback: 1000, allowProposedApi: true });
 
   const ptyProcess = pty.spawn(options.command, options.args ?? [], {
@@ -106,7 +131,7 @@ async function createPtyTerminal(options: TerminalOptions): Promise<TerminalWrap
     },
 
     async waitForOutput(timeoutMs: number) {
-      return waitForSettled(() => isAlive, () => outputBuffer, () => lastOutputTime, () => wrapper.readScreen(), timeoutMs, wrapper);
+      return waitForSettled(() => isAlive, () => outputBuffer, () => lastOutputTime, () => wrapper.readScreen(), timeoutMs, wrapper, settleMs);
     },
 
     resize(newCols: number, newRows: number) {
@@ -125,7 +150,7 @@ async function createPtyTerminal(options: TerminalOptions): Promise<TerminalWrap
   };
 
   // Wait for startup output to detect prompt
-  await new Promise((r) => setTimeout(r, 1000));
+  await waitForStartup(() => outputBuffer.length, settleMs);
   const startupScreen = wrapper.readScreen();
   promptPattern = detectPromptPattern(startupScreen);
   wrapper.promptPattern = promptPattern;
@@ -138,7 +163,7 @@ async function createPtyTerminal(options: TerminalOptions): Promise<TerminalWrap
  * In pipe mode, some programs need extra flags to behave interactively.
  * Returns modified args array with interactive flags prepended if needed.
  */
-function pipeInteractiveArgs(command: string, args: string[]): string[] {
+export function pipeInteractiveArgs(command: string, args: string[]): string[] {
   const base = command.split("/").pop() ?? command;
 
   // Python: needs -i for interactive mode, -u for unbuffered
@@ -164,6 +189,24 @@ function pipeInteractiveArgs(command: string, args: string[]): string[] {
     return args;
   }
 
+  // Ruby IRB: needs --noreadline to avoid readline issues in pipe mode
+  if (base === "irb") {
+    if (!args.includes("--noreadline")) return ["--noreadline", ...args];
+    return args;
+  }
+
+  // Lua: needs -i for interactive mode
+  if (base === "lua" || /^lua5\.\d+$/.test(base)) {
+    if (!args.includes("-i")) return ["-i", ...args];
+    return args;
+  }
+
+  // SQLite3: needs -interactive flag
+  if (base === "sqlite3") {
+    if (!args.includes("-interactive")) return ["-interactive", ...args];
+    return args;
+  }
+
   return args;
 }
 
@@ -171,6 +214,7 @@ function pipeInteractiveArgs(command: string, args: string[]): string[] {
  * Create a pipe-mode terminal directly (exported for testing).
  */
 export async function createPipeTerminal(options: TerminalOptions): Promise<TerminalWrapper> {
+  const settleMs = options.settleMs ?? 300;
   const args = pipeInteractiveArgs(options.command, options.args ?? []);
   const envVars = {
     ...process.env,
@@ -210,10 +254,9 @@ export async function createPipeTerminal(options: TerminalOptions): Promise<Term
     }
   }
 
-  return new Promise((resolve, reject) => {
-
-    if (!proc.pid) {
-      // Handle spawn errors that come async
+  if (!proc.pid) {
+    // Handle spawn errors that come async
+    await new Promise<void>((_, reject) => {
       proc.once("error", (err) => {
         reject(new Error(`Failed to spawn "${options.command}": ${err.message}`));
       });
@@ -223,113 +266,115 @@ export async function createPipeTerminal(options: TerminalOptions): Promise<Term
           reject(new Error(`Failed to spawn "${options.command}": no pid assigned`));
         }
       }, 500);
-      return;
-    }
+    });
+  }
 
-    let isAlive = true;
-    let promptPattern: RegExp | null = null;
-    let outputLines: string[] = [];
-    let lastOutputTime = Date.now();
-    let outputGeneration = 0;
-    // Separate buffer for output since last write()
-    let newOutputBuffer = "";
+  let isAlive = true;
+  let promptPattern: RegExp | null = null;
+  let outputLines: string[] = [];
+  let lastOutputTime = Date.now();
+  let outputGeneration = 0;
+  // Separate buffer for output since last write()
+  let newOutputBuffer = "";
 
-    const appendOutput = (data: Buffer) => {
-      const text = data.toString();
-      newOutputBuffer += text;
+  const appendOutput = (data: Buffer) => {
+    const text = data.toString();
+    newOutputBuffer += text;
 
-      // Also maintain full output lines for full_screen reads
-      const parts = text.split("\n");
-      if (parts.length === 1) {
-        if (outputLines.length === 0) outputLines.push("");
+    // Also maintain full output lines for full_screen reads
+    const parts = text.split("\n");
+    if (parts.length === 1) {
+      if (outputLines.length === 0) outputLines.push("");
+      outputLines[outputLines.length - 1] += parts[0];
+    } else {
+      if (outputLines.length > 0) {
         outputLines[outputLines.length - 1] += parts[0];
       } else {
-        if (outputLines.length > 0) {
-          outputLines[outputLines.length - 1] += parts[0];
-        } else {
-          outputLines.push(parts[0]);
-        }
-        for (let i = 1; i < parts.length; i++) {
-          outputLines.push(parts[i]);
-        }
+        outputLines.push(parts[0]);
       }
-      lastOutputTime = Date.now();
-      outputGeneration++;
-
-      // Cap scrollback at 2000 lines
-      if (outputLines.length > 2000) {
-        outputLines = outputLines.slice(-1000);
+      for (let i = 1; i < parts.length; i++) {
+        outputLines.push(parts[i]);
       }
-    };
+    }
+    lastOutputTime = Date.now();
+    outputGeneration++;
 
-    proc.stdout!.on("data", appendOutput);
-    proc.stderr!.on("data", appendOutput);
+    // Cap scrollback at 2000 lines
+    if (outputLines.length > 2000) {
+      outputLines = outputLines.slice(-1000);
+    }
+  };
 
-    proc.on("exit", () => { isAlive = false; });
-    proc.on("error", () => { isAlive = false; });
+  proc.stdout!.on("data", appendOutput);
+  proc.stderr!.on("data", appendOutput);
 
-    const wrapper: TerminalWrapper = {
-      process: proc,
-      pid: proc.pid!,
-      get isAlive() { return isAlive; },
-      promptPattern,
-      mode: "pipe",
+  proc.on("exit", () => { isAlive = false; });
+  proc.on("error", () => { isAlive = false; });
 
-      write(data: string) {
-        if (!isAlive) throw new Error("Session is not alive");
-        // Clear new output buffer so readScreen returns only new output
-        newOutputBuffer = "";
-        proc.stdin!.write(data);
-      },
+  const wrapper: TerminalWrapper = {
+    process: proc,
+    pid: proc.pid!,
+    get isAlive() { return isAlive; },
+    promptPattern,
+    mode: "pipe",
 
-      readScreen(fullScreen = false): string {
-        if (fullScreen) {
-          return stripAnsi(outputLines.join("\n"));
-        }
-        // Return only output received since the last write()
-        return stripAnsi(newOutputBuffer);
-      },
+    write(data: string) {
+      if (!isAlive) throw new Error("Session is not alive");
+      // Clear new output buffer so readScreen returns only new output
+      newOutputBuffer = "";
+      proc.stdin!.write(data);
+    },
 
-      async waitForOutput(timeoutMs: number) {
-        const startGen = outputGeneration;
-        return waitForSettled(
-          () => isAlive,
-          () => String(outputGeneration),
-          () => lastOutputTime,
-          () => wrapper.readScreen(),
-          timeoutMs,
-          wrapper,
-        );
-      },
+    readScreen(fullScreen = false): string {
+      if (fullScreen) {
+        return stripAnsi(outputLines.join("\n"));
+      }
+      // Return only output received since the last write()
+      return stripAnsi(newOutputBuffer);
+    },
 
-      resize(_cols: number, _rows: number) {
-        // No-op in pipe mode — no PTY to resize
-      },
+    async waitForOutput(timeoutMs: number) {
+      return waitForSettled(
+        () => isAlive,
+        () => String(outputGeneration),
+        () => lastOutputTime,
+        () => wrapper.readScreen(),
+        timeoutMs,
+        wrapper,
+        settleMs,
+      );
+    },
 
-      kill(signal?: string) {
-        if (isAlive) {
-          const sig = (signal as NodeJS.Signals) ?? "SIGTERM";
-          try { process.kill(-proc.pid!, sig); } catch { proc.kill(sig); }
-          isAlive = false;
-        }
-      },
+    resize(_cols: number, _rows: number) {
+      // No-op in pipe mode — no PTY to resize
+    },
 
-      dispose() {
-        if (isAlive) {
-          try { process.kill(-proc.pid!, "SIGTERM"); } catch { proc.kill("SIGTERM"); }
-          isAlive = false;
-        }
-      },
-    };
+    kill(signal?: string) {
+      if (isAlive) {
+        const sig = (signal as NodeJS.Signals) ?? "SIGTERM";
+        try { process.kill(-proc.pid!, sig); } catch { proc.kill(sig); }
+        isAlive = false;
+      }
+    },
 
-    // Wait for startup output to detect prompt
-    setTimeout(() => {
-      const startupScreen = wrapper.readScreen();
-      promptPattern = detectPromptPattern(startupScreen);
-      wrapper.promptPattern = promptPattern;
-      resolve(wrapper);
-    }, 1000);
-  });
+    dispose() {
+      if (isAlive) {
+        try { process.kill(-proc.pid!, "SIGTERM"); } catch { proc.kill("SIGTERM"); }
+        isAlive = false;
+      }
+    },
+
+    clearOutputBuffer() {
+      newOutputBuffer = "";
+    },
+  };
+
+  // Wait for startup output to detect prompt
+  await waitForStartup(() => newOutputBuffer.length, settleMs);
+  const startupScreen = wrapper.readScreen();
+  promptPattern = detectPromptPattern(startupScreen);
+  wrapper.promptPattern = promptPattern;
+  return wrapper;
 }
 
 // ─── Shared wait logic ──────────────────────────────────────────────
@@ -341,6 +386,7 @@ function waitForSettled(
   getScreen: () => string,
   timeoutMs: number,
   wrapper: TerminalWrapper,
+  settleMs: number = 300,
 ): Promise<{ output: string; isComplete: boolean }> {
   const startMarker = getOutputMarker();
   const startTime = Date.now();
@@ -363,7 +409,7 @@ function waitForSettled(
 
       const timeSinceOutput = Date.now() - getLastOutputTime();
 
-      if (timeSinceOutput >= OUTPUT_SETTLE_MS && getOutputMarker() !== startMarker) {
+      if (timeSinceOutput >= settleMs && getOutputMarker() !== startMarker) {
         const screen = getScreen();
         if (wrapper.promptPattern && endsWithPrompt(screen, wrapper.promptPattern)) {
           res({ output: screen, isComplete: true });
@@ -371,7 +417,7 @@ function waitForSettled(
         }
         if (!settled) {
           settled = true;
-          setTimeout(check, OUTPUT_SETTLE_MS);
+          setTimeout(check, settleMs);
           return;
         }
         res({ output: screen, isComplete: true });

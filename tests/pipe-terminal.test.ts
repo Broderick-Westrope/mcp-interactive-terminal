@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { createPipeTerminal } from "../src/terminal.js";
+import { createPipeTerminal, pipeInteractiveArgs } from "../src/terminal.js";
 import type { TerminalWrapper } from "../src/types.js";
 
 const BASH = "/bin/bash";
@@ -122,4 +122,40 @@ describe("Pipe Terminal", () => {
 
     expect(output).toContain("4200");
   }, 10000);
+});
+
+describe("pipeInteractiveArgs", () => {
+  it("adds --noreadline to irb when not present", () => {
+    expect(pipeInteractiveArgs("irb", [])).toEqual(["--noreadline"]);
+    expect(pipeInteractiveArgs("/usr/bin/irb", [])).toEqual(["--noreadline"]);
+  });
+
+  it("does not duplicate --noreadline for irb", () => {
+    expect(pipeInteractiveArgs("irb", ["--noreadline"])).toEqual(["--noreadline"]);
+  });
+
+  it("adds -i to lua when not present", () => {
+    expect(pipeInteractiveArgs("lua", [])).toEqual(["-i"]);
+    expect(pipeInteractiveArgs("lua5.4", [])).toEqual(["-i"]);
+    expect(pipeInteractiveArgs("lua5.1", [])).toEqual(["-i"]);
+  });
+
+  it("does not duplicate -i for lua", () => {
+    expect(pipeInteractiveArgs("lua", ["-i"])).toEqual(["-i"]);
+  });
+
+  it("adds -interactive to sqlite3 when not present", () => {
+    expect(pipeInteractiveArgs("sqlite3", [])).toEqual(["-interactive"]);
+    expect(pipeInteractiveArgs("/usr/bin/sqlite3", [])).toEqual(["-interactive"]);
+  });
+
+  it("does not duplicate -interactive for sqlite3", () => {
+    expect(pipeInteractiveArgs("sqlite3", ["-interactive"])).toEqual(["-interactive"]);
+  });
+
+  it("preserves existing args alongside new flags", () => {
+    expect(pipeInteractiveArgs("irb", ["--some-flag"])).toEqual(["--noreadline", "--some-flag"]);
+    expect(pipeInteractiveArgs("lua", ["script.lua"])).toEqual(["-i", "script.lua"]);
+    expect(pipeInteractiveArgs("sqlite3", ["mydb.db"])).toEqual(["-interactive", "mydb.db"]);
+  });
 });

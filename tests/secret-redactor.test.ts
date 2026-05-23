@@ -27,4 +27,23 @@ describe("redactSecrets", () => {
     const text = "Just some normal output with no secrets";
     expect(redactSecrets(text)).toBe(text);
   });
+
+  it("does NOT redact a 40-char hex string (e.g. a git SHA)", () => {
+    const gitSha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    const result = redactSecrets(`commit ${gitSha}`);
+    expect(result).toContain(gitSha);
+    expect(result).not.toContain("[REDACTED");
+  });
+
+  it("still redacts AWS AKIA access keys", () => {
+    const result = redactSecrets("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE");
+    expect(result).toContain("[REDACTED:AWS_ACCESS_KEY]");
+    expect(result).not.toContain("AKIAIOSFODNN7EXAMPLE");
+  });
+
+  it("still redacts GitHub PATs starting with ghp_", () => {
+    const result = redactSecrets("token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12345");
+    expect(result).toContain("[REDACTED:GITHUB_PAT]");
+    expect(result).not.toContain("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12345");
+  });
 });
